@@ -1,3 +1,5 @@
+-- asdadsa
+
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -691,17 +693,4 @@ InfoSection:Section({
 	TextSize = 18,
 	TextTransparency = 0.35,
 	FontWeight = Enum.FontWeight.Medium,
-})
-
-InfoTab:Space({ Columns = 4 })
-
-InfoTab:Button({
-	Title = "Destroy Window",
-	Color = Color3.fromHex("#ff4830"),
-	Justify = "Center",
-	Icon = "shredder",
-	IconAlign = "Left",
-	Callback = function()
-		Window:Destroy()
-	end,
 })
