@@ -579,17 +579,44 @@ Window:Tag({
 
 -- ==================== TABS ====================
 
--- Player Tab
-local PlayerTab = Window:Tab({
-	Title = "Player",
+-- Home Tab
+local HomeTab = Window:Tab({
+	Title = "Home",
+	Icon = "solar:home-2-bold",
+	IconColor = Color3.fromHex("#FFFFFF"),
+	IconShape = "Square",
+	Border = true,
+})
+
+local HomeSection = HomeTab:Section({
+	Title = "Welcome to Vertex",
+})
+
+HomeSection:Section({
+	Title = "Vertex Menu",
+	TextSize = 28,
+	FontWeight = Enum.FontWeight.Bold,
+})
+
+HomeSection:Space()
+
+HomeSection:Section({
+	Title = "Ein modernes Roblox Script Hub Interface.\n\nWähle einen Tab aus der Sidebar um zu beginnen.",
+	TextSize = 18,
+	TextTransparency = 0.35,
+	FontWeight = Enum.FontWeight.Medium,
+})
+
+-- ==================== PLAYER OPTIONS TAB ====================
+local PlayerOptionsTab = Window:Tab({
+	Title = "Player Options",
 	Icon = "solar:user-bold",
 	IconColor = Color3.fromHex("#FF4B69"),
 	IconShape = "Square",
 	Border = true,
 })
 
--- Player Options Section
-local PlayerSection = PlayerTab:Section({
+local PlayerSection = PlayerOptionsTab:Section({
 	Title = "Player Options",
 })
 
