@@ -1,9 +1,12 @@
 local RunService = game:GetService("RunService")
---[[
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local Camera = Workspace.CurrentCamera
 
-    WindUI Example (wip)
-    
-]]
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
 
 local cloneref = (cloneref or clonereference or function(instance)
 	return instance
@@ -30,1337 +33,648 @@ do
 	end
 end
 
---[[
+-- ==================== FEATURE VARIABLEN ====================
+local godModeActive = false
+local invisibleActive = false
+local freeCamActive = false
+local cursorLocked = false
+local originalWalkSpeed = 16
+local originalJumpPower = 50
 
-WindUI.Creator.AddIcons("solar", {
-    ["CheckSquareBold"] = "rbxassetid://132438947521974",
-    ["CursorSquareBold"] = "rbxassetid://120306472146156",
-    ["FileTextBold"] = "rbxassetid://89294979831077",
-    ["FolderWithFilesBold"] = "rbxassetid://74631950400584",
-    ["HamburgerMenuBold"] = "rbxassetid://134384554225463",
-    ["Home2Bold"] = "rbxassetid://92190299966310",
-    ["InfoSquareBold"] = "rbxassetid://119096461016615",
-    ["PasswordMinimalisticInputBold"] = "rbxassetid://109919668957167",
-    ["SolarSquareTransferHorizontalBold"] = "rbxassetid://125444491429160",
-})--]]
+-- ==================== FREECAM TEMPLATE VARIABLEN ====================
+local pi    = math.pi
+local abs   = math.abs
+local clamp = math.clamp
+local exp   = math.exp
+local rad   = math.rad
+local sign  = math.sign
+local sqrt  = math.sqrt
+local tan   = math.tan
 
-function createPopup()
-	return WindUI:Popup({
-		Title = "Welcome to the WindUI!",
-		Icon = "bird",
-		Content = "Hello!",
-		Buttons = {
-			{
-				Title = "Hahaha",
-				Icon = "bird",
-				Variant = "Tertiary",
-			},
-			{
-				Title = "Hahaha",
-				Icon = "bird",
-				Variant = "Tertiary",
-			},
-			{
-				Title = "Hahaha",
-				Icon = "bird",
-				Variant = "Tertiary",
-			},
-		},
+local FREECAM_ENABLED_ATTRIBUTE_NAME = "FreecamEnabled"
+local TOGGLE_INPUT_PRIORITY = Enum.ContextActionPriority.Low.Value
+local INPUT_PRIORITY = Enum.ContextActionPriority.High.Value
+local FREECAM_MACRO_KB = {Enum.KeyCode.LeftShift, Enum.KeyCode.P}
+
+local NAV_GAIN = Vector3.new(1, 1, 1)*64
+local PAN_GAIN = Vector2.new(0.75, 1)*8
+local FOV_GAIN = 300
+
+local PITCH_LIMIT = rad(90)
+
+local VEL_STIFFNESS = 1.5
+local PAN_STIFFNESS = 1.0
+local FOV_STIFFNESS = 4.0
+
+-- ==================== SPRING CLASS ====================
+local Spring = {} do
+	Spring.__index = Spring
+
+	function Spring.new(freq, pos)
+		local self = setmetatable({}, Spring)
+		self.f = freq
+		self.p = pos
+		self.v = pos*0
+		return self
+	end
+
+	function Spring:Update(dt, goal)
+		local f = self.f*2*pi
+		local p0 = self.p
+		local v0 = self.v
+
+		local offset = goal - p0
+		local decay = exp(-f*dt)
+
+		local p1 = goal + (v0*dt - offset*(f*dt + 1))*decay
+		local v1 = (f*dt*(offset*f - v0) + v0)*decay
+
+		self.p = p1
+		self.v = v1
+
+		return p1
+	end
+
+	function Spring:Reset(pos)
+		self.p = pos
+		self.v = pos*0
+	end
+end
+
+-- ==================== FREECAM VARIABLEN ====================
+local cameraPos = Vector3.new()
+local cameraRot = Vector2.new()
+local cameraFov = 0
+
+local velSpring = Spring.new(VEL_STIFFNESS, Vector3.new())
+local panSpring = Spring.new(PAN_STIFFNESS, Vector2.new())
+local fovSpring = Spring.new(FOV_STIFFNESS, 0)
+
+-- ==================== FREECAM INPUT ====================
+local Input = {} do
+	local thumbstickCurve do
+		local K_CURVATURE = 2.0
+		local K_DEADZONE = 0.15
+
+		local function fCurve(x)
+			return (exp(K_CURVATURE*x) - 1)/(exp(K_CURVATURE) - 1)
+		end
+
+		local function fDeadzone(x)
+			return fCurve((x - K_DEADZONE)/(1 - K_DEADZONE))
+		end
+
+		function thumbstickCurve(x)
+			return sign(x)*clamp(fDeadzone(abs(x)), 0, 1)
+		end
+	end
+
+	local gamepad = {
+		ButtonX = 0,
+		ButtonY = 0,
+		DPadDown = 0,
+		DPadUp = 0,
+		ButtonL2 = 0,
+		ButtonR2 = 0,
+		Thumbstick1 = Vector2.new(),
+		Thumbstick2 = Vector2.new(),
+	}
+
+	local keyboard = {
+		W = 0,
+		A = 0,
+		S = 0,
+		D = 0,
+		E = 0,
+		Q = 0,
+		U = 0,
+		H = 0,
+		J = 0,
+		K = 0,
+		I = 0,
+		Y = 0,
+		Up = 0,
+		Down = 0,
+		LeftShift = 0,
+		RightShift = 0,
+	}
+
+	local mouse = {
+		Delta = Vector2.new(),
+		MouseWheel = 0,
+	}
+
+	local NAV_GAMEPAD_SPEED  = Vector3.new(1, 1, 1)
+	local NAV_KEYBOARD_SPEED = Vector3.new(1, 1, 1)
+	local PAN_MOUSE_SPEED    = Vector2.new(1, 1)*(pi/64)
+	local PAN_GAMEPAD_SPEED  = Vector2.new(1, 1)*(pi/8)
+	local FOV_WHEEL_SPEED    = 1.0
+	local FOV_GAMEPAD_SPEED  = 0.25
+	local NAV_ADJ_SPEED      = 0.75
+	local NAV_SHIFT_MUL      = 0.25
+
+	local navSpeed = 1
+
+	function Input.Vel(dt)
+		navSpeed = clamp(navSpeed + dt*(keyboard.Up - keyboard.Down)*NAV_ADJ_SPEED, 0.01, 4)
+
+		local kGamepad = Vector3.new(
+			thumbstickCurve(gamepad.Thumbstick1.X),
+			thumbstickCurve(gamepad.ButtonR2) - thumbstickCurve(gamepad.ButtonL2),
+			thumbstickCurve(-gamepad.Thumbstick1.Y)
+		)*NAV_GAMEPAD_SPEED
+
+		local kKeyboard = Vector3.new(
+			keyboard.D - keyboard.A + keyboard.K - keyboard.H,
+			keyboard.E - keyboard.Q + keyboard.I - keyboard.Y,
+			keyboard.S - keyboard.W + keyboard.J - keyboard.U
+		)*NAV_KEYBOARD_SPEED
+
+		local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+
+		return (kGamepad + kKeyboard)*(navSpeed*(shift and NAV_SHIFT_MUL or 1))
+	end
+
+	function Input.Pan(dt)
+		local kGamepad = Vector2.new(
+			thumbstickCurve(gamepad.Thumbstick2.Y),
+			thumbstickCurve(-gamepad.Thumbstick2.X)
+		)*PAN_GAMEPAD_SPEED
+		local kMouse = mouse.Delta*PAN_MOUSE_SPEED
+		mouse.Delta = Vector2.new()
+		return kGamepad + kMouse
+	end
+
+	function Input.Fov(dt)
+		local kGamepad = (gamepad.ButtonX - gamepad.ButtonY)*FOV_GAMEPAD_SPEED
+		local kMouse = mouse.MouseWheel*FOV_WHEEL_SPEED
+		mouse.MouseWheel = 0
+		return kGamepad + kMouse
+	end
+
+	do
+		local function Keypress(action, state, input)
+			keyboard[input.KeyCode.Name] = state == Enum.UserInputState.Begin and 1 or 0
+			return Enum.ContextActionResult.Sink
+		end
+
+		local function GpButton(action, state, input)
+			gamepad[input.KeyCode.Name] = state == Enum.UserInputState.Begin and 1 or 0
+			return Enum.ContextActionResult.Sink
+		end
+
+		local function MousePan(action, state, input)
+			local delta = input.Delta
+			mouse.Delta = Vector2.new(-delta.y, -delta.x)
+			return Enum.ContextActionResult.Sink
+		end
+
+		local function Thumb(action, state, input)
+			gamepad[input.KeyCode.Name] = input.Position
+			return Enum.ContextActionResult.Sink
+		end
+
+		local function Trigger(action, state, input)
+			gamepad[input.KeyCode.Name] = input.Position.z
+			return Enum.ContextActionResult.Sink
+		end
+
+		local function MouseWheel(action, state, input)
+			mouse[input.UserInputType.Name] = -input.Position.z
+			return Enum.ContextActionResult.Sink
+		end
+
+		local function Zero(t)
+			for k, v in pairs(t) do
+				t[k] = v*0
+			end
+		end
+
+		function Input.StartCapture()
+			ContextActionService:BindActionAtPriority("FreecamKeyboard", Keypress, false, INPUT_PRIORITY,
+				Enum.KeyCode.W, Enum.KeyCode.U,
+				Enum.KeyCode.A, Enum.KeyCode.H,
+				Enum.KeyCode.S, Enum.KeyCode.J,
+				Enum.KeyCode.D, Enum.KeyCode.K,
+				Enum.KeyCode.E, Enum.KeyCode.I,
+				Enum.KeyCode.Q, Enum.KeyCode.Y,
+				Enum.KeyCode.Up, Enum.KeyCode.Down
+			)
+			ContextActionService:BindActionAtPriority("FreecamMousePan",          MousePan,   false, INPUT_PRIORITY, Enum.UserInputType.MouseMovement)
+			ContextActionService:BindActionAtPriority("FreecamMouseWheel",        MouseWheel, false, INPUT_PRIORITY, Enum.UserInputType.MouseWheel)
+			ContextActionService:BindActionAtPriority("FreecamGamepadButton",     GpButton,   false, INPUT_PRIORITY, Enum.KeyCode.ButtonX, Enum.KeyCode.ButtonY)
+			ContextActionService:BindActionAtPriority("FreecamGamepadTrigger",    Trigger,    false, INPUT_PRIORITY, Enum.KeyCode.ButtonR2, Enum.KeyCode.ButtonL2)
+			ContextActionService:BindActionAtPriority("FreecamGamepadThumbstick", Thumb,      false, INPUT_PRIORITY, Enum.KeyCode.Thumbstick1, Enum.KeyCode.Thumbstick2)
+		end
+
+		function Input.StopCapture()
+			navSpeed = 1
+			Zero(gamepad)
+			Zero(keyboard)
+			Zero(mouse)
+			ContextActionService:UnbindAction("FreecamKeyboard")
+			ContextActionService:UnbindAction("FreecamMousePan")
+			ContextActionService:UnbindAction("FreecamMouseWheel")
+			ContextActionService:UnbindAction("FreecamGamepadButton")
+			ContextActionService:UnbindAction("FreecamGamepadTrigger")
+			ContextActionService:UnbindAction("FreecamGamepadThumbstick")
+		end
+	end
+end
+
+-- ==================== FREECAM FUNKTIONEN ====================
+local function StepFreecam(dt)
+	local vel = velSpring:Update(dt, Input.Vel(dt))
+	local pan = panSpring:Update(dt, Input.Pan(dt))
+	local fov = fovSpring:Update(dt, Input.Fov(dt))
+
+	local zoomFactor = sqrt(tan(rad(70/2))/tan(rad(cameraFov/2)))
+
+	cameraFov = clamp(cameraFov + fov*FOV_GAIN*(dt/zoomFactor), 1, 120)
+	cameraRot = cameraRot + pan*PAN_GAIN*(dt/zoomFactor)
+	cameraRot = Vector2.new(clamp(cameraRot.x, -PITCH_LIMIT, PITCH_LIMIT), cameraRot.y%(2*pi))
+
+	local cameraCFrame = CFrame.new(cameraPos)*CFrame.fromOrientation(cameraRot.x, cameraRot.y, 0)*CFrame.new(vel*NAV_GAIN*dt)
+	cameraPos = cameraCFrame.p
+
+	Camera.CFrame = cameraCFrame
+	Camera.Focus = cameraCFrame 
+	Camera.FieldOfView = cameraFov
+end
+
+local PlayerState = {} do
+	local mouseBehavior
+	local mouseIconEnabled
+	local cameraType
+	local cameraFocus
+	local cameraCFrame
+	local cameraFieldOfView
+	local screenGuis = {}
+	local coreGuis = {
+		Backpack = true,
+		Chat = true,
+		Health = true,
+		PlayerList = true,
+	}
+	local setCores = {
+		BadgesNotificationsActive = true,
+		PointsNotificationsActive = true,
+	}
+
+	function PlayerState.Push()
+		for name in pairs(coreGuis) do
+			coreGuis[name] = StarterGui:GetCoreGuiEnabled(Enum.CoreGuiType[name])
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType[name], false)
+		end
+		for name in pairs(setCores) do
+			setCores[name] = StarterGui:GetCore(name)
+			StarterGui:SetCore(name, false)
+		end
+		local playergui = player:FindFirstChildOfClass("PlayerGui")
+		if playergui then
+			for _, gui in pairs(playergui:GetChildren()) do
+				if gui:IsA("ScreenGui") and gui.Enabled then
+					screenGuis[#screenGuis + 1] = gui
+					gui.Enabled = false
+				end
+			end
+		end
+
+		cameraFieldOfView = Camera.FieldOfView
+		Camera.FieldOfView = 70
+
+		cameraType = Camera.CameraType
+		Camera.CameraType = Enum.CameraType.Custom
+
+		cameraCFrame = Camera.CFrame
+		cameraFocus = Camera.Focus
+
+		mouseIconEnabled = UserInputService.MouseIconEnabled
+		UserInputService.MouseIconEnabled = false
+
+		mouseBehavior = UserInputService.MouseBehavior
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	end
+
+	function PlayerState.Pop()
+		for name, isEnabled in pairs(coreGuis) do
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType[name], isEnabled)
+		end
+		for name, isEnabled in pairs(setCores) do
+			StarterGui:SetCore(name, isEnabled)
+		end
+		for _, gui in pairs(screenGuis) do
+			if gui.Parent then
+				gui.Enabled = true
+			end
+		end
+
+		Camera.FieldOfView = cameraFieldOfView
+		cameraFieldOfView = nil
+
+		Camera.CameraType = cameraType
+		cameraType = nil
+
+		Camera.CFrame = cameraCFrame
+		cameraCFrame = nil
+
+		Camera.Focus = cameraFocus
+		cameraFocus = nil
+
+		UserInputService.MouseIconEnabled = mouseIconEnabled
+		mouseIconEnabled = nil
+
+		UserInputService.MouseBehavior = mouseBehavior
+		mouseBehavior = nil
+	end
+end
+
+-- ==================== FREECAM TOGGLE ====================
+local function StartFreecam()
+	if freeCamActive then return end
+	
+	freeCamActive = true
+	print("FreeCam aktiviert")
+	
+	if humanoid then
+		originalWalkSpeed = humanoid.WalkSpeed
+		originalJumpPower = humanoid.JumpPower
+		humanoid.WalkSpeed = 0
+		humanoid.JumpPower = 0
+		humanoid.PlatformStand = true
+	end
+
+	local cameraCFrame = Camera.CFrame
+	cameraRot = Vector2.new(cameraCFrame:toEulerAnglesYXZ())
+	cameraPos = cameraCFrame.p
+	cameraFov = Camera.FieldOfView
+
+	velSpring:Reset(Vector3.new())
+	panSpring:Reset(Vector2.new())
+	fovSpring:Reset(0)
+
+	PlayerState.Push()
+	RunService:BindToRenderStep("Freecam", Enum.RenderPriority.Camera.Value, StepFreecam)
+	Input.StartCapture()
+	
+	cursorLocked = false
+end
+
+local function StopFreecam()
+	if not freeCamActive then return end
+	
+	freeCamActive = false
+	print("FreeCam deaktiviert")
+	
+	if humanoid then
+		humanoid.WalkSpeed = originalWalkSpeed
+		humanoid.JumpPower = originalJumpPower
+		humanoid.PlatformStand = false
+	end
+
+	Input.StopCapture()
+	RunService:UnbindFromRenderStep("Freecam")
+	PlayerState.Pop()
+	
+	cursorLocked = false
+	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	UserInputService.MouseIconEnabled = false
+end
+
+-- ==================== FEATURE FUNKTIONEN ====================
+
+-- GodMode Funktion
+local function toggleGodMode(state)
+	godModeActive = state
+	if state then
+		if humanoid then
+			humanoid.MaxHealth = math.huge
+			humanoid.Health = math.huge
+			humanoid.BreakJointsOnDeath = false
+		end
+		WindUI:Notify({
+			Title = "God Mode",
+			Content = "God Mode aktiviert!",
+			Icon = "shield-check",
+			Duration = 3,
+		})
+	else
+		if humanoid then
+			humanoid.MaxHealth = 100
+			humanoid.Health = 100
+			humanoid.BreakJointsOnDeath = true
+		end
+		WindUI:Notify({
+			Title = "God Mode",
+			Content = "God Mode deaktiviert!",
+			Icon = "shield-off",
+			Duration = 3,
+		})
+	end
+end
+
+-- Invisible Funktion
+local function toggleInvisible(state)
+	invisibleActive = state
+	if character then
+		for _, part in ipairs(character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.Transparency = state and 1 or 0
+			end
+			if part:IsA("Accessory") or part:IsA("Clothing") then
+				part.Enabled = not state
+			end
+		end
+		if character:FindFirstChild("HumanoidRootPart") then
+			character.HumanoidRootPart.Transparency = state and 1 or 0
+			character.HumanoidRootPart.CanCollide = not state
+		end
+	end
+	WindUI:Notify({
+		Title = "Invisible",
+		Content = state and "Unsichtbar aktiviert!" or "Unsichtbar deaktiviert!",
+		Icon = state and "eye-closed" or "eye",
+		Duration = 3,
 	})
 end
 
--- */  Window  /* --
-local Window = WindUI:CreateWindow({
-	Title = ".ftgs hub  |  WindUI Example",
-	--Author = "by .ftgs • Footagesus",
-	Folder = "ftgshub",
-	Icon = "solar:folder-2-bold-duotone",
-	--Theme = "Mellowsi",
-	--IconSize = 22*2,
-	NewElements = true,
-	--Size = UDim2.fromOffset(700,700),
+-- FreeCam Toggle
+local function toggleFreeCam(state)
+	if state then
+		StartFreecam()
+	else
+		StopFreecam()
+	end
+	WindUI:Notify({
+		Title = "FreeCam",
+		Content = state and "FreeCam aktiviert! (R für Cursor)" or "FreeCam deaktiviert!",
+		Icon = state and "camera" or "camera-off",
+		Duration = 3,
+	})
+end
 
-	HideSearchBar = false,
+-- ==================== CURSOR TOGGLE (NUR IN FREECAM) ====================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	
+	if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.R then
+		if freeCamActive then
+			cursorLocked = not cursorLocked
+			if cursorLocked then
+				UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+				UserInputService.MouseIconEnabled = true
+				WindUI:Notify({
+					Title = "Cursor",
+					Content = "Maus-Cursor aktiviert",
+					Icon = "mouse",
+					Duration = 2,
+				})
+			else
+				UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+				UserInputService.MouseIconEnabled = false
+				WindUI:Notify({
+					Title = "Cursor",
+					Content = "Maus-Cursor deaktiviert",
+					Icon = "mouse-off",
+					Duration = 2,
+				})
+			end
+		end
+	end
+end)
+
+-- ==================== WINDOW ====================
+local Window = WindUI:CreateWindow({
+	Title = "Vertex Menu",
+	Folder = "Vertex",
+	Icon = "solar:folder-2-bold-duotone",
+	NewElements = true,
 
 	OpenButton = {
-		Title = "Open .ftgs hub UI", -- can be changed
-		CornerRadius = UDim.new(1, 0), -- fully rounded
-		StrokeThickness = 3, -- removing outline
-		Enabled = true, -- enable or disable openbutton
+		Title = "Open Vertex Menu",
+		CornerRadius = UDim.new(1, 0),
+		StrokeThickness = 3,
+		Enabled = true,
 		Draggable = true,
 		OnlyMobile = false,
 		Scale = 0.5,
-
-		Color = ColorSequence.new( -- gradient
-			Color3.fromHex("#30FF6A"),
-			Color3.fromHex("#e7ff2f")
+		Color = ColorSequence.new(
+			Color3.fromHex("#FF4B69"),
+			Color3.fromHex("#825AFF")
 		),
 	},
 	Topbar = {
 		Height = 44,
-		ButtonsType = "Mac", -- Default or Mac
+		ButtonsType = "Mac",
 	},
 })
 
---createPopup()
-
---Window:SetUIScale(.8)
-
--- */  Tags  /* --
-do
-	Window:Tag({
-		Title = "v" .. WindUI.Version,
-		Icon = "github",
-		Color = Color3.fromHex("#1c1c1c"),
-		Border = true,
-	})
-end
-
--- */  Colors  /* --
-local Purple = Color3.fromHex("#7775F2")
-local Yellow = Color3.fromHex("#ECA201")
-local Green = Color3.fromHex("#10C550")
-local Grey = Color3.fromHex("#83889E")
-local Blue = Color3.fromHex("#257AF7")
-local Red = Color3.fromHex("#EF4F1D")
-
--- */ Other Functions /* --
-local function parseJSON(luau_table, indent, level, visited)
-	indent = indent or 2
-	level = level or 0
-	visited = visited or {}
-
-	local currentIndent = string.rep(" ", level * indent)
-	local nextIndent = string.rep(" ", (level + 1) * indent)
-
-	if luau_table == nil then
-		return "null"
-	end
-
-	local dataType = type(luau_table)
-
-	if dataType == "table" then
-		if visited[luau_table] then
-			return '"[Circular Reference]"'
-		end
-
-		visited[luau_table] = true
-
-		local isArray = true
-		local maxIndex = 0
-
-		for k, _ in pairs(luau_table) do
-			if type(k) == "number" and k > maxIndex then
-				maxIndex = k
-			end
-			if type(k) ~= "number" or k <= 0 or math.floor(k) ~= k then
-				isArray = false
-				break
-			end
-		end
-
-		local count = 0
-		for _ in pairs(luau_table) do
-			count = count + 1
-		end
-		if count ~= maxIndex and isArray then
-			isArray = false
-		end
-
-		if count == 0 then
-			return "{}"
-		end
-
-		if isArray then
-			if count == 0 then
-				return "[]"
-			end
-
-			local result = "[\n"
-
-			for i = 1, maxIndex do
-				result = result .. nextIndent .. parseJSON(luau_table[i], indent, level + 1, visited)
-				if i < maxIndex then
-					result = result .. ","
-				end
-				result = result .. "\n"
-			end
-
-			result = result .. currentIndent .. "]"
-			return result
-		else
-			local result = "{\n"
-			local first = true
-
-			local keys = {}
-			for k in pairs(luau_table) do
-				table.insert(keys, k)
-			end
-			table.sort(keys, function(a, b)
-				if type(a) == type(b) then
-					return tostring(a) < tostring(b)
-				else
-					return type(a) < type(b)
-				end
-			end)
-
-			for _, k in ipairs(keys) do
-				local v = luau_table[k]
-				if not first then
-					result = result .. ",\n"
-				else
-					first = false
-				end
-
-				if type(k) == "string" then
-					result = result .. nextIndent .. '"' .. k .. '": '
-				else
-					result = result .. nextIndent .. '"' .. tostring(k) .. '": '
-				end
-
-				result = result .. parseJSON(v, indent, level + 1, visited)
-			end
-
-			result = result .. "\n" .. currentIndent .. "}"
-			return result
-		end
-	elseif dataType == "string" then
-		local escaped = luau_table:gsub("\\", "\\\\")
-		escaped = escaped:gsub('"', '\\"')
-		escaped = escaped:gsub("\n", "\\n")
-		escaped = escaped:gsub("\r", "\\r")
-		escaped = escaped:gsub("\t", "\\t")
-
-		return '"' .. escaped .. '"'
-	elseif dataType == "number" then
-		return tostring(luau_table)
-	elseif dataType == "boolean" then
-		return luau_table and "true" or "false"
-	elseif dataType == "function" then
-		return '"function"'
-	else
-		return '"' .. dataType .. '"'
-	end
-end
-
-local function tableToClipboard(luau_table, indent)
-	indent = indent or 4
-	local jsonString = parseJSON(luau_table, indent)
-	setclipboard(jsonString)
-	return jsonString
-end
-
--- */  About Tab  /* --
-do
-	local AboutTab = Window:Tab({
-		Title = "About WindUI",
-		Desc = "Description Example",
-		Icon = "solar:info-square-bold",
-		IconColor = Grey,
-		IconShape = "Square",
-		Border = true,
-	})
-
-	local AboutSection = AboutTab:Section({
-		Title = "About WindUI",
-	})
-
-	AboutSection:Image({
-		Image = "https://repository-images.githubusercontent.com/880118829/22c020eb-d1b1-4b34-ac4d-e33fd88db38d",
-		AspectRatio = "16:9",
-		Radius = 9,
-	})
-
-	AboutSection:Space({ Columns = 3 })
-
-	AboutSection:Section({
-		Title = "What is WindUI?",
-		TextSize = 24,
-		FontWeight = Enum.FontWeight.SemiBold,
-	})
-
-	AboutSection:Space()
-
-	AboutSection:Section({
-		Title = "WindUI is a stylish, open-source UI (User Interface) library specifically designed for Roblox Script Hubs.\nDeveloped by Footagesus (.ftgs, Footages).\nIt aims to provide developers with a modern, customizable, and easy-to-use toolkit for creating visually appealing interfaces within Roblox.\nThe project is primarily written in Lua (Luau), the scripting language used in Roblox.",
-		TextSize = 18,
-		TextTransparency = 0.35,
-		FontWeight = Enum.FontWeight.Medium,
-	})
-
-	AboutTab:Space({ Columns = 4 })
-
-	-- Default buttons
-
-	AboutTab:Button({
-		Title = "Export WindUI JSON (copy)",
-		Color = Color3.fromHex("#a2ff30"),
-		Justify = "Center",
-		IconAlign = "Left",
-		Icon = "", -- removing icon
-		Callback = function()
-			tableToClipboard(WindUI)
-			WindUI:Notify({
-				Title = "WindUI JSON",
-				Content = "Copied to Clipboard!",
-			})
-		end,
-	})
-	AboutTab:Space({ Columns = 1 })
-
-	AboutTab:Button({
-		Title = "Destroy Window",
-		Color = Color3.fromHex("#ff4830"),
-		Justify = "Center",
-		Icon = "shredder",
-		IconAlign = "Left",
-		Callback = function()
-			Window:Destroy()
-		end,
-	})
-end
-
--- */  Elements Section  /* --
-local ElementsSection = Window:Section({
-	Title = "Elements",
-})
-local ConfigUsageSection = Window:Section({
-	Title = "Config Usage",
-})
-local OtherSection = Window:Section({
-	Title = "Other",
+-- Tags
+Window:Tag({
+	Title = "v1.0",
+	Icon = "github",
+	Color = Color3.fromHex("#1c1c1c"),
+	Border = true,
 })
 
--- */  Overview Tab  /* --
-do
-	local OverviewTab = ElementsSection:Tab({
-		Title = "Overview",
-		Icon = "solar:home-2-bold",
-		IconColor = Grey,
-		IconShape = "Square",
-		Border = true,
-	})
-
-	local OverviewSection1 = OverviewTab:Section({
-		Title = "Group's Example",
-	})
-
-	local OverviewGroup1 = OverviewTab:Group({})
-
-	OverviewGroup1:Button({
-		Title = "Button 1",
-		Justify = "Center",
-		Icon = "",
-		Callback = function()
-			print("clicked button 1")
-		end,
-	})
-	OverviewGroup1:Space()
-	OverviewGroup1:Button({
-		Title = "Button 2",
-		Justify = "Center",
-		Icon = "",
-		Callback = function()
-			print("clicked button 2")
-		end,
-	})
-
-	OverviewTab:Space()
-
-	local OverviewGroup2 = OverviewTab:Group({})
-
-	OverviewGroup2:Button({
-		Title = "Button 1",
-		Justify = "Center",
-		Icon = "",
-		Callback = function()
-			print("clicked button 1")
-		end,
-	})
-	OverviewGroup2:Space()
-	OverviewGroup2:Toggle({
-		Title = "Toggle 2",
-		Callback = function(v)
-			print("clicked toggle 2:", v)
-		end,
-	})
-	OverviewGroup2:Space()
-	OverviewGroup2:Colorpicker({
-		Title = "Colorpicker 3",
-		Default = Color3.fromHex("#30ff6a"),
-		Callback = function(color)
-			print(color)
-		end,
-	})
-
-	OverviewTab:Space()
-
-	local OverviewGroup3 = OverviewTab:Group({})
-
-	local OverviewSection1 = OverviewGroup3:Section({
-		Title = "Section 1",
-		Desc = "Section exampleee",
-		Box = true,
-		BoxBorder = true,
-		Opened = true,
-	})
-	OverviewSection1:Button({
-		Title = "Button 1",
-		Justify = "Center",
-		Icon = "",
-		Callback = function()
-			print("clicked button 1")
-		end,
-	})
-	OverviewSection1:Space()
-	OverviewSection1:Toggle({
-		Title = "Toggle 2",
-		Callback = function(v)
-			print("clicked toggle 2:", v)
-		end,
-	})
-
-	OverviewGroup3:Space()
-
-	local OverviewSection2 = OverviewGroup3:Section({
-		Title = "Section 2",
-		Box = true,
-		BoxBorder = true,
-		Opened = true,
-	})
-	OverviewSection2:Button({
-		Title = "Button 1",
-		Justify = "Center",
-		Icon = "",
-		Callback = function()
-			print("clicked button 1")
-		end,
-	})
-	OverviewSection2:Space()
-	OverviewSection2:Button({
-		Title = "Button 2",
-		Justify = "Center",
-		Icon = "",
-		Callback = function()
-			print("clicked button 2")
-		end,
-	})
-
-	--OverviewTab:Space()
-end
-
--- */  Toggle Tab  /* --
-do
-	local ToggleTab = ElementsSection:Tab({
-		Title = "Toggle",
-		Icon = "solar:check-square-bold",
-		IconColor = Green,
-		IconShape = "Square",
-		Border = true,
-	})
-
-	ToggleTab:Toggle({
-		Title = "Toggle",
-	})
-
-	ToggleTab:Space()
-
-	ToggleTab:Toggle({
-		Title = "Toggle",
-		Desc = "Toggle example",
-	})
-
-	ToggleTab:Space()
-
-	local ToggleGroup1 = ToggleTab:Group()
-	ToggleGroup1:Toggle({})
-	ToggleGroup1:Space()
-	ToggleGroup1:Toggle({})
-
-	ToggleTab:Space()
-
-	ToggleTab:Toggle({
-		Title = "Checkbox",
-		Type = "Checkbox",
-	})
-
-	ToggleTab:Space()
-
-	ToggleTab:Toggle({
-		Title = "Checkbox",
-		Desc = "Checkbox example",
-		Type = "Checkbox",
-	})
-
-	ToggleTab:Space()
-
-	ToggleTab:Toggle({
-		Title = "Toggle",
-		Locked = true,
-		LockedTitle = "This element is locked",
-	})
-
-	ToggleTab:Toggle({
-		Title = "Toggle",
-		Desc = "Toggle example",
-		Locked = true,
-		LockedTitle = "This element is locked",
-	})
-end
-
--- */  Button Tab  /* --
-do
-	local ButtonTab = ElementsSection:Tab({
-		Title = "Button",
-		Icon = "solar:cursor-square-bold",
-		IconColor = Blue,
-		IconShape = "Square",
-		Border = true,
-	})
-
-	local HighlightButton
-	HighlightButton = ButtonTab:Button({
-		Title = "Highlight Button",
-		Icon = "mouse",
-		Callback = function()
-			print("clicked highlight")
-			HighlightButton:Highlight()
-		end,
-	})
-
-	ButtonTab:Space()
-
-	ButtonTab:Button({
-		Title = "Blue Button",
-		Color = Color3.fromHex("#305dff"),
-		Icon = "",
-		Callback = function() end,
-	})
-
-	ButtonTab:Space()
-
-	ButtonTab:Button({
-		Title = "Blue Button",
-		Desc = "With description",
-		Color = Color3.fromHex("#305dff"),
-		Icon = "",
-		Callback = function() end,
-	})
-
-	ButtonTab:Space()
-
-	ButtonTab:Button({
-		Title = "Notify Button",
-		--Desc = "Button example",
-		Callback = function()
-			WindUI:Notify({
-				Title = "Hello",
-				Content = "Welcome to the WindUI Example!",
-				Icon = "solar:bell-bold",
-				Duration = 5,
-				CanClose = false,
-			})
-		end,
-	})
-
-	ButtonTab:Button({
-		Title = "Notify Button 2",
-		--Desc = "Button example",
-		Callback = function()
-			WindUI:Notify({
-				Title = "Hello",
-				Content = "Welcome to the WindUI Example!",
-				--Icon = "solar:bell-bold",
-				Duration = 5,
-				CanClose = false,
-			})
-		end,
-	})
-
-	ButtonTab:Space()
-
-	ButtonTab:Button({
-		Title = "Button",
-		Locked = true,
-		LockedTitle = "This element is locked",
-	})
-
-	ButtonTab:Button({
-		Title = "Button",
-		Desc = "Button example",
-		Locked = true,
-		LockedTitle = "This element is locked",
-	})
-end
-
--- */  Input Tab  /* --
-do
-	local InputTab = ElementsSection:Tab({
-		Title = "Input",
-		Icon = "solar:password-minimalistic-input-bold",
-		IconColor = Purple,
-		IconShape = "Square",
-		Border = true,
-	})
-
-	InputTab:Input({
-		Title = "Input",
-		Icon = "mouse",
-	})
-
-	InputTab:Space()
-
-	InputTab:Input({
-		Title = "Input Textarea",
-		Type = "Textarea",
-		Icon = "mouse",
-	})
-
-	InputTab:Space()
-
-	InputTab:Input({
-		Title = "Input Textarea",
-		Type = "Textarea",
-		--Icon = "mouse",
-	})
-
-	InputTab:Space()
-
-	InputTab:Input({
-		Title = "Input",
-		Desc = "Input example",
-	})
-
-	InputTab:Space()
-
-	InputTab:Input({
-		Title = "Input Textarea",
-		Desc = "Input example",
-		Type = "Textarea",
-	})
-
-	InputTab:Space()
-
-	InputTab:Input({
-		Title = "Input",
-		Locked = true,
-		LockedTitle = "This element is locked",
-	})
-
-	InputTab:Input({
-		Title = "Input",
-		Desc = "Input example",
-		Locked = true,
-		LockedTitle = "This element is locked",
-	})
-end
-
--- */  Slider Tab  /* --
-do
-	local SliderTab = ElementsSection:Tab({
-		Title = "Slider",
-		Icon = "solar:square-transfer-horizontal-bold",
-		IconColor = Green,
-		IconShape = "Square",
-		Border = true,
-	})
-
-	SliderTab:Section({
-		Title = "Default Slider with Tooltip and without textbox",
-		TextSize = 14,
-	})
-
-	SliderTab:Slider({
-		Title = "Slider Example",
-		Desc = "Hahahahaha hello",
-		IsTooltip = true,
-		IsTextbox = false,
-		Width = 200,
-		Step = 1,
-		Value = {
-			Min = 0,
-			Max = 200,
-			Default = 100,
-		},
-		Callback = function(value)
-			print(value)
-		end,
-	})
-
-	SliderTab:Space()
-
-	SliderTab:Section({
-		Title = "Slider without description",
-		TextSize = 14,
-	})
-
-	SliderTab:Slider({
-		Title = "Slider Example",
-		Step = 1,
-		Width = 200,
-		Value = {
-			Min = 0,
-			Max = 200,
-			Default = 100,
-		},
-		Callback = function(value)
-			print(value)
-		end,
-	})
-
-	SliderTab:Space()
-
-	SliderTab:Section({
-		Title = "Slider without titles",
-		TextSize = 14,
-	})
-
-	SliderTab:Slider({
-		IsTooltip = true,
-		Step = 1,
-		Value = {
-			Min = 0,
-			Max = 200,
-			Default = 100,
-		},
-		Callback = function(value)
-			print(value)
-		end,
-	})
-
-	SliderTab:Space()
-
-	SliderTab:Section({
-		Title = "Slider with icons ('from' only)",
-		TextSize = 14,
-	})
-
-	SliderTab:Slider({
-		IsTooltip = true,
-		Step = 1,
-		Value = {
-			Min = 0,
-			Max = 200,
-			Default = 100,
-		},
-		Icons = {
-			From = "sfsymbols:sunMinFill",
-			--To = "sfsymbols:sunMaxFill",
-		},
-		Callback = function(value)
-			print(value)
-		end,
-	})
-
-	SliderTab:Space()
-
-	SliderTab:Section({
-		Title = "Slider with icons (from & to)",
-		TextSize = 14,
-	})
-
-	SliderTab:Slider({
-		IsTooltip = true,
-		Step = 1,
-		Value = {
-			Min = 0,
-			Max = 100,
-			Default = 50,
-		},
-		Icons = {
-			From = "sfsymbols:sunMinFill",
-			To = "sfsymbols:sunMaxFill",
-		},
-		Callback = function(value)
-			print(value)
-		end,
-	})
-end
-
--- */  Dropdown Tab  /* --
-do
-	local DropdownTab = ElementsSection:Tab({
-		Title = "Dropdown",
-		Icon = "solar:hamburger-menu-bold",
-		IconColor = Yellow,
-		IconShape = "Square",
-		Border = true,
-	})
-
-	DropdownTab:Dropdown({
-		Title = "Advanced Dropdown (example)",
-		Values = {
-			{
-				Title = "New file",
-				Desc = "Create a new file",
-				Icon = "file-plus",
-				Callback = function()
-					print("Clicked 'New File'")
-				end,
-			},
-			{
-				Title = "Copy link",
-				Desc = "Copy the file link",
-				Icon = "copy",
-				Callback = function()
-					print("Clicked 'Copy link'")
-				end,
-			},
-			{
-				Title = "Edit file",
-				Desc = "Allows you to edit the file",
-				Icon = "file-pen",
-				Callback = function()
-					print("Clicked 'Edit file'")
-				end,
-			},
-			{
-				Type = "Divider",
-			},
-			{
-				Title = "Delete file",
-				Desc = "Permanently delete the file",
-				Icon = "trash",
-				Callback = function()
-					print("Clicked 'Delete file'")
-				end,
-			},
-		},
-	})
-
-	DropdownTab:Space()
-
-	DropdownTab:Dropdown({
-		Title = "Multi Dropdown",
-		Values = {
-			"Привет",
-			"Hello",
-			"Сәлем",
-			"Bonjour",
-		},
-		Value = nil,
-		AllowNone = true,
-		Multi = true,
-		Callback = function(selectedValue)
-			print("Selected: " .. selectedValue)
-		end,
-	})
-
-	DropdownTab:Space()
-
-	DropdownTab:Dropdown({
-		Title = "No Multi Dropdown (default",
-		Values = {
-			"Привет",
-			"Hello",
-			"Сәлем",
-			"Bonjour",
-		},
-		Value = 1,
-		--AllowNone = true,
-		Callback = function(selectedValue)
-			print("Selected: " .. selectedValue)
-		end,
-	})
-
-	DropdownTab:Space()
-end
-
--- */  Config Usage  /* --
-if not RunService:IsStudio() and writefile and printidentity() then
-	do -- config elements
-		local ConfigElementsTab = ConfigUsageSection:Tab({
-			Title = "Config Elements",
-			Icon = "solar:file-text-bold",
-			IconColor = Blue,
-			IconShape = nil,
-			Border = true,
-		})
-
-		-- All elements are taken from the official documentation: https://footagesus.github.io/WindUI-Docs/docs
-
-		-- Saving elements to the config using `Flag`
-
-		ConfigElementsTab:Colorpicker({
-			Flag = "ColorpickerTest",
-			Title = "Colorpicker",
-			Desc = "Colorpicker Description",
-			Default = Color3.fromRGB(0, 255, 0),
-			Transparency = 0,
-			Locked = false,
-			Callback = function(color)
-				print("Background color: " .. tostring(color))
-			end,
-		})
-
-		ConfigElementsTab:Space()
-
-		ConfigElementsTab:Dropdown({
-			Flag = "DropdownTest",
-			Title = "Advanced Dropdown",
-			Values = {
-				{
-					Title = "Category A",
-					Icon = "bird",
-				},
-				{
-					Title = "Category B",
-					Icon = "house",
-				},
-				{
-					Title = "Category C",
-					Icon = "droplet",
-				},
-			},
-			Value = "Category A",
-			Callback = function(option)
-				print("Category selected: " .. option.Title .. " with icon " .. option.Icon)
-			end,
-		})
-		ConfigElementsTab:Dropdown({
-			Flag = "DropdownTest2",
-			Title = "Advanced Dropdown 2",
-			Values = {
-				{
-					Title = "Category A",
-					Icon = "bird",
-				},
-				{
-					Title = "Category B",
-					Icon = "house",
-				},
-				{
-					Title = "Category C",
-					Icon = "droplet",
-					Locked = true,
-				},
-			},
-			Value = "Category A",
-			Multi = true,
-			Callback = function(options)
-				local titles = {}
-				for _, v in ipairs(options) do
-					table.insert(titles, v.Title)
-				end
-				print("Selected: " .. table.concat(titles, ", "))
-			end,
-		})
-
-		ConfigElementsTab:Space()
-
-		ConfigElementsTab:Input({
-			Flag = "InputTest",
-			Title = "Input",
-			Desc = "Input Description",
-			Value = "Default value",
-			InputIcon = "bird",
-			Type = "Input", -- or "Textarea"
-			Placeholder = "Enter text...",
-			Callback = function(input)
-				print("Text entered: " .. input)
-			end,
-		})
-
-		ConfigElementsTab:Space()
-
-		ConfigElementsTab:Keybind({
-			Flag = "KeybindTest",
-			Title = "Keybind",
-			Desc = "Keybind to open ui",
-			Value = "G",
-			Callback = function(v)
-				Window:SetToggleKey(Enum.KeyCode[v])
-			end,
-		})
-
-		ConfigElementsTab:Space()
-
-		ConfigElementsTab:Slider({
-			Flag = "SliderTest",
-			Title = "Slider",
-			Step = 1,
-			Value = {
-				Min = 20,
-				Max = 120,
-				Default = 70,
-			},
-			Callback = function(value)
-				print(value)
-			end,
-		})
-		ConfigElementsTab:Slider({
-			Flag = "SliderTest2",
-			--Title = "Slider",
-			Icons = {
-				From = "sfsymbols:sunMinFill",
-				To = "sfsymbols:sunMaxFill",
-			},
-			Step = 1,
-			IsTooltip = true,
-			Value = {
-				Min = 0,
-				Max = 100,
-				Default = 50,
-			},
-			Callback = function(value)
-				print(value)
-			end,
-		})
-
-		ConfigElementsTab:Space()
-
-		ConfigElementsTab:Toggle({
-			Flag = "ToggleTest",
-			Title = "Toggle Panel Background",
-			--Desc = "Toggle Description",
-			--Icon = "house",
-			--Type = "Checkbox",
-			Value = not Window.HidePanelBackground,
-			Callback = function(state)
-				Window:SetPanelBackground(state)
-			end,
-		})
-
-		ConfigElementsTab:Toggle({
-			Flag = "ToggleTest",
-			Title = "Toggle",
-			Desc = "Toggle Description",
-			--Icon = "house",
-			--Type = "Checkbox",
-			Value = false,
-			Callback = function(state)
-				print("Toggle Activated" .. tostring(state))
-			end,
-		})
-	end
-
-	do -- config panel
-		local ConfigTab = ConfigUsageSection:Tab({
-			Title = "Config Usage",
-			Icon = "solar:folder-with-files-bold",
-			IconColor = Purple,
-			IconShape = nil,
-			Border = true,
-		})
-
-		local ConfigManager = Window.ConfigManager
-		local ConfigName = "default"
-
-		local ConfigNameInput = ConfigTab:Input({
-			Title = "Config Name",
-			Icon = "file-cog",
-			Callback = function(value)
-				ConfigName = value
-			end,
-		})
-
-		ConfigTab:Space()
-
-		-- local AutoLoadToggle = ConfigTab:Toggle({
-		--     Title = "Enable Auto Load to Selected Config",
-		--     Value = false,
-		--     Callback = function(v)
-		--         Window.CurrentConfig:SetAutoLoad(v)
-		--     end
-		-- })
-
-		-- ConfigTab:Space()
-
-		local AllConfigs = ConfigManager:AllConfigs()
-		local DefaultValue = table.find(AllConfigs, ConfigName) and ConfigName or nil
-
-		local AllConfigsDropdown = ConfigTab:Dropdown({
-			Title = "All Configs",
-			Desc = "Select existing configs",
-			Values = AllConfigs,
-			Value = DefaultValue,
-			Callback = function(value)
-				ConfigName = value
-				ConfigNameInput:Set(value)
-
-				--AutoLoadToggle:Set(ConfigManager:GetConfig(ConfigName).AutoLoad or false)
-			end,
-		})
-
-		ConfigTab:Space()
-
-		ConfigTab:Button({
-			Title = "Save Config",
-			Icon = "",
-			Justify = "Center",
-			Callback = function()
-				Window.CurrentConfig = ConfigManager:Config(ConfigName)
-				if Window.CurrentConfig:Save() then
-					WindUI:Notify({
-						Title = "Config Saved",
-						Desc = "Config '" .. ConfigName .. "' saved",
-						Icon = "check",
-					})
-				end
-
-				AllConfigsDropdown:Refresh(ConfigManager:AllConfigs())
-			end,
-		})
-
-		ConfigTab:Space()
-
-		ConfigTab:Button({
-			Title = "Load Config",
-			Icon = "",
-			Justify = "Center",
-			Callback = function()
-				Window.CurrentConfig = ConfigManager:CreateConfig(ConfigName)
-				if Window.CurrentConfig:Load() then
-					WindUI:Notify({
-						Title = "Config Loaded",
-						Desc = "Config '" .. ConfigName .. "' loaded",
-						Icon = "refresh-cw",
-					})
-				end
-			end,
-		})
-
-		ConfigTab:Space()
-
-		ConfigTab:Button({
-			Title = "Print AutoLoad Configs",
-			Icon = "",
-			Justify = "Center",
-			Callback = function()
-				print(HttpService:JSONDecode(ConfigManager:GetAutoLoadConfigs()))
-			end,
-		})
-	end
-end
-
--- */  Other  /* --
-do
-	local InviteCode = "ftgs-development-hub-1300692552005189632"
-	local DiscordAPI = "https://discord.com/api/v10/invites/" .. InviteCode .. "?with_counts=true&with_expiration=true"
-
-	local Response = WindUI.cloneref(game:GetService("HttpService"))
-		:JSONDecode(WindUI.Creator.Request and WindUI.Creator.Request({
-			Url = DiscordAPI,
-			Method = "GET",
-			Headers = {
-				["User-Agent"] = "WindUI/Example",
-				["Accept"] = "application/json",
-			},
-		}).Body or "{}")
-
-	local DiscordTab = OtherSection:Tab({
-		Title = "Discord",
-		Border = true,
-	})
-
-	if Response and Response.guild then
-		DiscordTab:Section({
-			Title = "Join our Discord server!",
-			TextSize = 20,
-		})
-		local DiscordServerParagraph = DiscordTab:Paragraph({
-			Title = tostring(Response.guild.name),
-			Desc = tostring(Response.guild.description),
-			Image = "https://cdn.discordapp.com/icons/"
-				.. Response.guild.id
-				.. "/"
-				.. Response.guild.icon
-				.. ".png?size=1024",
-			Thumbnail = "https://cdn.discordapp.com/banners/1300692552005189632/35981388401406a4b7dffd6f447a64c4.png?size=512",
-			ImageSize = 48,
-			Buttons = {
-				{
-					Title = "Copy link",
-					Icon = "link",
-					Callback = function()
-						setclipboard("https://discord.gg/" .. InviteCode)
-					end,
-				},
-			},
-		})
-	elseif RunService:IsStudio() or not writefile then
-		DiscordTab:Paragraph({
-			Title = "Discord API is not available in Studio mode.",
-			TextSize = 20,
-			Justify = "Center",
-			Image = "solar:info-circle-bold",
-			Color = "Red",
-			Buttons = {
-				{
-					Title = "Get/Copy Invite Link",
-					Icon = "link",
-					Callback = function()
-						if setclipboard then
-							setclipboard("https://discord.gg/" .. InviteCode)
-						else
-							WindUI:Notify({
-								Title = "Discord Invite Link",
-								Content = "https://discord.gg/" .. InviteCode,
-							})
-						end
-					end,
-				},
-			},
-		})
-	else
-		DiscordTab:Paragraph({
-			Title = "Failed to fetch Discord server info.",
-			TextSize = 20,
-			Justify = "Center",
-			Image = "solar:info-circle-bold",
-			Color = "Red",
-		})
-	end
-end
-
-local Tabs = {
-	ExampleTab = Window:Tab({
-		Title = "Example Tab",
-		Icon = "bird",
-	}),
-}
-
-local dropdownA
-
-local LargeListA = {
-	"All",
-	"Item A2",
-	"Item A3",
-	"Item A4",
-	"Item A5",
-	"Item A6",
-	"Item A7",
-	"Item A8",
-	"Item A9",
-	"Item A10",
-	"Item A11",
-	"Item A12",
-	"Item A13",
-	"Item A14",
-	"Item A15",
-	"Item A16",
-	"Item A17",
-	"Item A18",
-	"Item A19",
-	"Item A20",
-	"Item A21",
-	"Item A22",
-	"Item A23",
-	"Item A24",
-	"Item A25",
-	"Item A26",
-	"Item A27",
-	"Item A28",
-	"Item A29",
-	"Item A30",
-	"Item A31",
-	"Item A32",
-	"Item A33",
-	"Item A34",
-	"Item A35",
-	"Item A36",
-	"Item A37",
-	"Item A38",
-	"Item A39",
-	"Item A40",
-	"Item A41",
-	"Item A42",
-	"Item A43",
-	"Item A44",
-	"Item A45",
-	"Item A46",
-	"Item A47",
-	"Item A48",
-	"Item A49",
-	"Item A50",
-	"Item A51",
-	"Item A52",
-	"Item A53",
-	"Item A54",
-	"Item A55",
-	"Item A56",
-	"Item A57",
-	"Item A58",
-	"Item A59",
-	"Item A60",
-	"Item A61",
-	"Item A62",
-	"Item A63",
-	"Item A64",
-	"Item A65",
-	"Item A66",
-	"Item A67",
-	"Item A68",
-	"Item A69",
-	"Item A70",
-	"Item A71",
-	"Item A72",
-	"Item A73",
-	"Item A74",
-	"Item A75",
-	"Item A76",
-	"Item A77",
-	"Item A78",
-	"Item A79",
-	"Item A80",
-	"Item A81",
-	"Item A82",
-	"Item A83",
-	"Item A84",
-	"Item A85",
-	"Item A86",
-	"Item A87",
-	"Item A88",
-	"Item A89",
-	"Item A90",
-	"Item A91",
-	"Item A92",
-	"Item A93",
-	"Item A94",
-	"Item A95",
-	"Item A96",
-	"Item A97",
-	"Item A98",
-	"Item A99",
-	"Item A100",
-}
-
-local LargeListB = {
-	"Data B1",
-	"Data B2",
-	"Data B3",
-	"Data B4",
-	"Data B5",
-	"Data B6",
-	"Data B7",
-	"Data B8",
-	"Data B9",
-	"Data B10",
-}
-
-Tabs.ExampleTab:Dropdown({
-	Title = "Main Category",
-	Values = { "All", "Other Option" },
-	Value = "All",
-	Callback = function(option)
-		if dropdownA then
-			task.spawn(function()
-				if option == "All" then
-					dropdownA:Refresh(LargeListA)
-				else
-					dropdownA:Refresh(LargeListB)
-				end
-
-				dropdownA:Select({ "All" })
-			end)
-		end
+-- ==================== TABS ====================
+
+-- Player Tab
+local PlayerTab = Window:Tab({
+	Title = "Player",
+	Icon = "solar:user-bold",
+	IconColor = Color3.fromHex("#FF4B69"),
+	IconShape = "Square",
+	Border = true,
+})
+
+-- Player Options Section
+local PlayerSection = PlayerTab:Section({
+	Title = "Player Options",
+})
+
+-- God Mode Toggle
+PlayerSection:Toggle({
+	Title = "God Mode",
+	Desc = "Macht dich unsterblich",
+	Icon = "shield-check",
+	Value = false,
+	Callback = function(state)
+		toggleGodMode(state)
 	end,
 })
 
-dropdownA = Tabs.ExampleTab:Dropdown({
-	Title = "Target",
-	Values = LargeListA,
-	Multi = true,
-	Value = { "All" },
-	Callback = function(option) end,
+PlayerSection:Space()
+
+-- Invisible Toggle
+PlayerSection:Toggle({
+	Title = "Invisible",
+	Desc = "Macht dich unsichtbar für andere Spieler",
+	Icon = "eye-closed",
+	Value = false,
+	Callback = function(state)
+		toggleInvisible(state)
+	end,
+})
+
+PlayerSection:Space()
+
+-- FreeCam Toggle
+PlayerSection:Toggle({
+	Title = "FreeCam",
+	Desc = "Aktiviere freie Kamerabewegung (R für Cursor)",
+	Icon = "camera",
+	Value = false,
+	Callback = function(state)
+		toggleFreeCam(state)
+	end,
+})
+
+-- ==================== INFORMATION TAB ====================
+local InfoTab = Window:Tab({
+	Title = "Info",
+	Icon = "solar:info-square-bold",
+	IconColor = Color3.fromHex("#825AFF"),
+	IconShape = "Square",
+	Border = true,
+})
+
+local InfoSection = InfoTab:Section({
+	Title = "About Vertex",
+})
+
+InfoSection:Image({
+	Image = "https://repository-images.githubusercontent.com/880118829/22c020eb-d1b1-4b34-ac4d-e33fd88db38d",
+	AspectRatio = "16:9",
+	Radius = 9,
+})
+
+InfoSection:Space({ Columns = 3 })
+
+InfoSection:Section({
+	Title = "Vertex Menu",
+	TextSize = 24,
+	FontWeight = Enum.FontWeight.SemiBold,
+})
+
+InfoSection:Space()
+
+InfoSection:Section({
+	Title = "Ein modernes Roblox Script Hub Interface.\nEntwickelt mit WindUI.\n\nFeatures:\n• God Mode\n• Invisible\n• FreeCam\n\nVersion: 1.0",
+	TextSize = 18,
+	TextTransparency = 0.35,
+	FontWeight = Enum.FontWeight.Medium,
+})
+
+InfoTab:Space({ Columns = 4 })
+
+InfoTab:Button({
+	Title = "Destroy Window",
+	Color = Color3.fromHex("#ff4830"),
+	Justify = "Center",
+	Icon = "shredder",
+	IconAlign = "Left",
+	Callback = function()
+		Window:Destroy()
+	end,
 })
